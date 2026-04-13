@@ -153,18 +153,16 @@ class SignetDataset:
         }
 
         for writer_id, data in self.writer_dict.items():
+            base_label = writer_id_map[writer_id] * 2  # 真实签名 label: 偶数
+            forg_label = base_label + 1  # 伪造签名 label: 奇数
 
-            label = writer_id_map[writer_id]
-
-            # 👉 只用 genuine（推荐）
             for img_path in data['genuine']:
-                self.samples.append((img_path, label))
-                self.labels.append(label)
+                self.samples.append((img_path, base_label))
+                self.labels.append(base_label)
 
-            # 👉 如果你想让模型学“伪造”，可以打开👇
-            # for img_path in data['forgery']:
-            #     self.samples.append((img_path, label))
-            #     self.labels.append(label)
+            for img_path in data['forgery']:
+                self.samples.append((img_path, forg_label))
+                self.labels.append(forg_label)
 
         print(f"Total samples: {len(self.samples)}")
 

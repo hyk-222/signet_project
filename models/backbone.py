@@ -53,7 +53,9 @@ class ResNet18_Signature(nn.Module):
 
         self.embedding = nn.Sequential(
             nn.Linear(512, 256),
+            nn.BatchNorm1d(256),  # 🔥 加一个 BN 稳定分布
             nn.ReLU(inplace=True),
+            nn.Dropout(p=0.4),  # 🔥 新增：随机丢弃 40% 的神经元，防止死记硬背
             nn.Linear(256, embedding_dim)
         )
 

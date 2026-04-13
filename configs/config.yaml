@@ -3,15 +3,15 @@ data:
   test_root_dir: ./data/test
 
 model:
-  backbone: signet  # 可选: signet, resnet18
+  backbone: resnet18  # 可选: signet, resnet18
   embedding_dim: 128
 
 train:
   batch_size: 32
   epochs: 30
-  learning_rate: 0.0003
+  learning_rate: 0.0001
   iterations_per_epoch: 100
   print_interval: 10
   save_interval: 10
   checkpoint_dir: ./checkpoints
-  margin: 0.5
+  margin: 0.3

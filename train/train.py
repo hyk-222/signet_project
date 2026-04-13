@@ -81,8 +81,8 @@ class Trainer:
             self.train_dataset,
             batch_sampler=PKSampler(
                 self.train_dataset,
-                P=8,   # ⭐ 推荐
-                K=4
+                P=16,   # ⭐ 推荐
+                K=2
             ),
             num_workers=4,
             pin_memory=True
@@ -118,7 +118,7 @@ class Trainer:
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=self.config['train']['learning_rate'],
-            weight_decay=1e-4
+            weight_decay=1e-3
         )
 
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -275,7 +275,7 @@ class Trainer:
                 embeddings = self.model.forward_once(imgs)
 
                 # ⭐ 必须：先归一化再放大
-                embeddings = F.normalize(embeddings, dim=1) * 10
+                embeddings = F.normalize(embeddings, dim=1)
 
                 loss = self.semi_hard_triplet_loss(
                     embeddings,
