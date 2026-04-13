@@ -241,7 +241,6 @@ class Trainer:
         return eer  # Early Stopping 现在改为根据 EER 停止（越小越好）
     # =====================================================
     def train(self):
-        print("🛠️ 执行数据增强自检...")
         # self.check_transforms(num_images=12)
         best_val = float('inf')
         patience = 5
