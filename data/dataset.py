@@ -21,7 +21,6 @@ class SignetDataset:
 
         self.writer_dict = {}
 
-        # 🔥 新增
         self.samples = []   # [(img_path, label)]
         self.labels = []    # [label1, label2, ...]
 
@@ -34,7 +33,6 @@ class SignetDataset:
             seed
         )
 
-        # 🔥 构建 samples（核心）
         self.build_samples()
 
     # ==================================================
@@ -139,14 +137,12 @@ class SignetDataset:
         )
 
     # ==================================================
-    # 🔥 构建 samples（Triplet关键）
+    #  samples（Triplet关键）
     # ==================================================
     def build_samples(self):
 
         self.samples = []
         self.labels = []
-
-        # 🔥 重新映射 label（保证连续）
         writer_id_map = {
             writer_id: idx
             for idx, writer_id in enumerate(self.writer_dict.keys())

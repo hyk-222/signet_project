@@ -10,7 +10,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Signet Project'
     )
-
+    parser.add_argument('--loss', type=str, help='覆盖 config 中的 loss 设置')
     parser.add_argument(
         '--mode',
         type=str,
@@ -31,23 +31,19 @@ if __name__ == '__main__':
     )
 
     args = parser.parse_args()
-
+    trainer = Trainer(args.config)
+    if args.loss:
+        trainer.loss_name = args.loss
     # ====================================
     # TRAIN MODE
     # ====================================
     if args.mode == 'train':
-
-        trainer = Trainer(args.config)
-
         trainer.train()
-
     # ====================================
     # EVAL MODE (验证集)
     # ====================================
     elif args.mode == 'eval':
-
         if args.checkpoint is None:
-
             raise ValueError(
                 "eval模式必须提供checkpoint"
             )

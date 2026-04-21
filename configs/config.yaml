@@ -7,6 +7,7 @@ model:
   embedding_dim: 128
 
 train:
+  loss_type: hybrid_triplet  # 可选: semi_hard_triplet, triplet, contrastive,hybrid_triplet,batch_hard_triplet
   batch_size: 32
   epochs: 30
   learning_rate: 0.0001
@@ -14,4 +15,8 @@ train:
   print_interval: 10
   save_interval: 10
   checkpoint_dir: ./checkpoints
-  margin: 0.3
+  margin: 0.2
+eval:
+  test: ./output/test
+  val: ./output/val
+  train: ./output/train
