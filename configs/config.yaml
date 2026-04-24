@@ -4,12 +4,12 @@ data:
   test_root_dir: ./data/test
   data_type: chisig  # 或 cedar
 model:
-  backbone: signet  # 可选: signet, resnet18
+  backbone: resnet18  # 可选: signet, resnet18
   embedding_dim: 128
 
 train:
   loss_type: hybrid_triplet  # 可选: semi_hard_triplet, triplet, contrastive,hybrid_triplet,batch_hard_triplet
-  batch_size: 32
+  batch_size: 8
   epochs: 30
   learning_rate: 0.0001
   iterations_per_epoch: 100
