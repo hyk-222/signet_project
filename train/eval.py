@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-
+import seaborn as sns
 from sklearn.metrics import roc_curve, accuracy_score, confusion_matrix
 from sklearn.manifold import TSNE
 
@@ -51,27 +51,56 @@ class Evaluator:
         return embeddings, labels
 
     # =====================================================
-    # 2. 构建 pair（避免 O(N²) 爆炸）
+    # 2. 构建平衡的 pair（优化点 2：1:1 正负样本比例）
     # =====================================================
-    def build_pairs(self, embeddings, labels, max_pairs=100000):
+    def build_pairs(self, embeddings, labels, pos_neg_ratio=1.0, max_pos_pairs=5000):
+        """
+        构建测试对，确保正负样本数量平衡。
+        :param pos_neg_ratio: 负样本与正样本的比例，默认为 1.0 (即 1:1)
+        :param max_pos_pairs: 限制最大正样本对数量，防止内存溢出
+        """
         N = len(labels)
+        pos_pairs = []
+        neg_pairs = []
 
-        pairs = []
+        # 1. 区分所有可能的正负对
         for i in range(N):
             for j in range(i + 1, N):
-                pairs.append((i, j))
+                if labels[i] == labels[j]:
+                    pos_pairs.append((i, j))
+                else:
+                    neg_pairs.append((i, j))
 
-        # ✅ 随机采样
-        if len(pairs) > max_pairs:
-            idx = np.random.choice(len(pairs), max_pairs, replace=False)
-            pairs = [pairs[i] for i in idx]
+        # 2. 随机打乱
+        np.random.seed(42)  # 固定种子保证评测可复现
+        np.random.shuffle(pos_pairs)
+        np.random.shuffle(neg_pairs)
+
+        # 3. 确定最终使用的数量
+        num_pos = len(pos_pairs)
+        if num_pos > max_pos_pairs:
+            num_pos = max_pos_pairs
+
+        # 负样本数量根据正样本数量按比例决定
+        num_neg = int(num_pos / pos_neg_ratio)
+        if num_neg > len(neg_pairs):
+            num_neg = len(neg_pairs)
+
+        # 截取选定的 pairs
+        final_pos_pairs = pos_pairs[:num_pos]
+        final_neg_pairs = neg_pairs[:num_neg]
+
+        print(
+            f"⚖️ Balanced Pairs -> Positive (Same): {len(final_pos_pairs)}, Negative (Diff): {len(final_neg_pairs)}")
+
+        # 4. 合并并计算相似度
+        pairs = final_pos_pairs + final_neg_pairs
 
         y_true = []
         y_score = []
 
         for i, j in pairs:
             same = 1 if labels[i] == labels[j] else 0
-
             # cosine similarity
             sim = np.dot(embeddings[i], embeddings[j])
 
@@ -79,7 +108,6 @@ class Evaluator:
             y_score.append(sim)
 
         return np.array(y_true), np.array(y_score)
-
     # =====================================================
     # 3. 计算指标（ROC / EER / ACC）
     # =====================================================
@@ -178,6 +206,32 @@ class Evaluator:
         plt.close()
 
     # =====================================================
+    # 新增: 绘制并保存混淆矩阵
+    # =====================================================
+    def plot_confusion_matrix(self, cm, epoch):
+        plt.figure(figsize=(8, 6))
+
+        # 标签定义
+        labels = ['Negative (Diff)', 'Positive (Same)']
+
+        # 绘制热力图
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=labels, yticklabels=labels,
+                    annot_kws={"size": 14})
+
+        plt.xlabel('Predicted Label', fontsize=12)
+        plt.ylabel('True Label', fontsize=12)
+        plt.title(f"Confusion Matrix Epoch {epoch}", fontsize=14)
+
+        plt.tight_layout()
+
+        # 保存图片
+        path = os.path.join(self.save_dir, f"cm_epoch_{epoch}.png")
+        plt.savefig(path, dpi=300)
+        plt.close()
+
+        print(f"✅ Confusion Matrix saved: {path}")
+    # =====================================================
     # 7. 主入口
     # =====================================================
     def run(self, dataloader, epoch):
@@ -195,7 +249,7 @@ class Evaluator:
         self.plot_roc(metrics["fpr"], metrics["tpr"], epoch)
         self.visualize_tsne(embeddings, labels, epoch)
         self.plot_distance_distribution(y_true, y_score, epoch)
-
+        self.plot_confusion_matrix(metrics['confusion_matrix'], epoch)
         # ===== 保存指标 =====
         report_path = os.path.join(self.save_dir, f"report_epoch_{epoch}.json")
         with open(report_path, "w") as f:

@@ -1,9 +1,10 @@
 data:
-  root_dir: ./data/signatures
+#  root_dir: ./data/signatures
+  root_dir: ./data/ChiSig
   test_root_dir: ./data/test
-
+  data_type: chisig  # 或 cedar
 model:
-  backbone: resnet18  # 可选: signet, resnet18
+  backbone: signet  # 可选: signet, resnet18
   embedding_dim: 128
 
 train:
@@ -15,7 +16,7 @@ train:
   print_interval: 10
   save_interval: 10
   checkpoint_dir: ./checkpoints
-  margin: 0.2
+  margin: 0.3
 eval:
   test: ./output/test
   val: ./output/val

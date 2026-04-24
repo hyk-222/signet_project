@@ -19,8 +19,34 @@ import numpy as np
 from sklearn.metrics import roc_curve
 import os
 from datetime import datetime
+from losses.arcface import ArcFace
+from PIL import Image
 
 
+class ResizeAndPad:
+    """等比例缩放并填充纯白背景，绝对不破坏中文签名的长宽比结构"""
+
+    def __init__(self, target_size=(150, 220)):
+        self.target_size = target_size  # (H, W)
+
+    def __call__(self, img):
+        w, h = img.size
+        # 计算缩放比例，以长边或宽边中最先碰到边界的为准
+        scale = min(self.target_size[1] / w, self.target_size[0] / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+
+        # 等比例缩放
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        # 创建一张 255 (纯白) 的底图
+        new_img = Image.new('L', (self.target_size[1], self.target_size[0]), 255)
+
+        # 将缩放后的图片居中贴上去
+        paste_x = (self.target_size[1] - new_w) // 2
+        paste_y = (self.target_size[0] - new_h) // 2
+        new_img.paste(img, (paste_x, paste_y))
+
+        return new_img
 def create_run_dir(base_dir):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = os.path.join(base_dir, timestamp)
@@ -56,9 +82,16 @@ class Trainer:
 
         # ===== transform =====
         self.transform = transforms.Compose([
-            transforms.Resize((150, 220)),
+            ResizeAndPad((150, 220)),  # 🔥 替换 Resize，保护汉字结构
             ElasticTransform(alpha=5, sigma=2, p=0.2),
             transforms.RandomAffine(degrees=2, translate=(0.02, 0.02), scale=(0.98, 1.02)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5]),
+            transforms.RandomErasing(p=0.5, scale=(0.02, 0.1), ratio=(0.3, 3.3), value=0)  # 保持随机擦除抗过拟合
+        ])
+
+        self.val_transform = transforms.Compose([
+            ResizeAndPad((150, 220)),  # 🔥 验证集同样替换
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5])
         ])
@@ -92,34 +125,82 @@ class Trainer:
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_sampler=PKSampler(self.train_dataset, P=8, K=4),
-            num_workers=4, pin_memory=True
+            num_workers=0, pin_memory=True
         )
 
         self.val_loader = DataLoader(
             PairGenerator(self.val_dataset, pairs_per_epoch=1000, fixed=True),
             batch_size=self.config['train']['batch_size'],
             shuffle=False,
-            num_workers=4
+            num_workers=0
         )
 
         self.test_loader = DataLoader(
             self.test_dataset,
             batch_size=self.config['train']['batch_size'],
             shuffle=False,
-            num_workers=4
+            num_workers=0
         )
+        # ===== 获取配置中的 backbone 类型 =====
+        backbone_type = self.config['model'].get('backbone', 'signet')
+        self.model = SiameseNetwork(backbone_type=backbone_type).to(self.device)
         # 模型与优化器
         self.model = SiameseNetwork().to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.config['train']['learning_rate'],
-                                    weight_decay=1e-3)
+
+        # ==========================================
+        # 🔥 ArcFace 初始化
+        # 训练集 38 个 writer，每个 writer 分为真/伪两类，共 76 类
+        # ==========================================
+        num_classes = len(self.train_dataset.writer_dict) * 2
+        self.arcface = ArcFace(in_features=128, out_features=num_classes, s=30.0, m=0.5).to(self.device)
+
+        # 🔥 把模型参数和 ArcFace 的类别中心参数一起交给优化器
+        self.optimizer = optim.Adam([
+            {'params': self.model.parameters()},
+            {'params': self.arcface.parameters()}
+        ], lr=self.config['train']['learning_rate'], weight_decay=1e-3)
+
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.epochs)
+        # ==========================================
+        #  核心优化：如果使用 resnet18，冻结底层参数，防止小数据集过拟合
+        # ==========================================
+        if backbone_type == 'resnet18':
+            print("❄️ Freezing early layers of ResNet18...")
+            # 冻结 stem 层 (conv1, bn1 等)
+            for param in self.model.backbone.conv1.parameters():
+                param.requires_grad = False
+            if hasattr(self.model.backbone, 'bn1'):  # 以防你替换了名字
+                for param in self.model.backbone.bn1.parameters():
+                    param.requires_grad = False
+
+            # 冻结 Layer1 和 Layer2 (因为底层特征已经足够好，不需要在38个人的数据上微调)
+            for param in self.model.backbone.layer1.parameters():
+                param.requires_grad = False
+            for param in self.model.backbone.layer2.parameters():
+                param.requires_grad = False
+
+            # Layer3, Layer4 以及 Embedding Head 保持 requires_grad=True 进行微调
+
+            # 只把需要计算梯度的参数传给优化器（非常重要！）
+            trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
+            self.optimizer = optim.Adam(trainable_params, lr=self.config['train']['learning_rate'], weight_decay=1e-3)
+        else:
+            # 如果是 SigNet，全部训练
+            self.optimizer = optim.Adam(self.model.parameters(), lr=self.config['train']['learning_rate'],
+                                        weight_decay=1e-3)
+
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.epochs)
 
     def compute_loss(self, embeddings, labels):
         """统一 Loss 计算接口，分流至不同算法"""
         # if self.loss_name == 'semi_hard_triplet':
         #     return self.semi_hard_triplet_loss(embeddings, labels)
-        if self.loss_name == 'batch_hard_triplet':
-            return self.batch_hard_triplet_loss(embeddings, labels)
+        """统一 Loss 计算接口，分流至不同算法"""
+        if self.loss_name == 'arcface':
+            # ArcFace 输出的是分类 logits
+            logits = self.arcface(embeddings, labels)
+            # 使用标准的交叉熵计算损失
+            return F.cross_entropy(logits, labels.long())
         elif self.loss_name == 'hybrid_triplet':
             return self.hybrid_triplet_loss(embeddings, labels)
         elif self.loss_name == 'triplet':
@@ -251,10 +332,10 @@ class Trainer:
 
     def validate(self):
         self.model.eval()
-
+        all_scores = []
+        all_labels = []
         all_dist = []
         all_label = []
-
         with torch.no_grad():
             for img1, img2, label in self.val_loader:
                 img1, img2 = img1.to(self.device), img2.to(self.device)
@@ -262,7 +343,11 @@ class Trainer:
                 emb1, emb2 = self.model(img1, img2)
                 emb1 = F.normalize(emb1, dim=1)
                 emb2 = F.normalize(emb2, dim=1)
-
+                # 统一使用余弦相似度 (Cosine Similarity)
+                # F.cosine_similarity 返回范围 [-1, 1]，1表示最相似
+                sim = F.cosine_similarity(emb1, emb2)
+                all_scores.extend(sim.cpu().numpy())
+                all_labels.extend(label.numpy())
                 dist = torch.norm(emb1 - emb2, dim=1)
 
                 all_dist.append(dist.cpu())
@@ -272,15 +357,17 @@ class Trainer:
         all_label = torch.cat(all_label).numpy()
 
         # ===== EER =====
-        fpr, tpr, _ = roc_curve(all_label, -all_dist)
+        # 计算 EER (注意：相似度越高，标签应越趋向于 1)
+        fpr, tpr, thresholds = roc_curve(all_labels, all_scores, pos_label=1)
         fnr = 1 - tpr
-        eer = fpr[np.nanargmin(np.abs(fpr - fnr))]
-
-        # ===== ACC =====
+        eer_threshold = thresholds[np.nanargmin(np.absolute((fnr - fpr)))]
+        eer = fpr[np.nanargmin(np.absolute((fnr - fpr)))]
+        # 寻找最佳准确率 (参考 eval.py 的逻辑)
         best_acc = 0
-        for t in np.linspace(0, 2, 50):
-            acc = ((all_dist < t) == all_label).mean()
-            best_acc = max(best_acc, acc)
+        for t in np.linspace(-1, 1, 100):
+            acc = ((np.array(all_scores) >= t) == np.array(all_labels)).mean()
+            if acc > best_acc:
+                best_acc = acc
 
         # ===== GAP =====
         pos = all_dist[all_label == 1]
@@ -289,31 +376,43 @@ class Trainer:
 
         return {
             "eer": eer,
+            "eer_threshold": eer_threshold,
             "acc": best_acc,
             "gap": gap
         }
     # =====================================================
     def train(self):
         best_val = float('inf')
-        patience = 3
+        patience = 5
         counter = 0
 
         self.history = []
         for epoch in range(self.epochs):
             self.model.train()
-
             total_loss = 0.0
             num_batches = 0
-
             start_time = time.time()
 
             print(f"\n🚀 Epoch {epoch + 1}/{self.epochs}")
 
             pbar = tqdm(self.train_loader, leave=False)
             for b_idx, (imgs, labels) in enumerate(pbar):
-                progress = epoch / self.epochs
-                self.margin = self.initial_margin * (1 - progress) + self.final_margin * progress
-                print(f"📉 Current Margin: {self.margin:.4f}")  # 可选（建议加）
+
+                # ==========================================
+                # 优化点 1：修复 Margin 策略
+                # ==========================================
+                # 方案 A (推荐)：使用固定 Margin。注释掉动态调整，直接使用 config 中的设定
+                self.margin = self.config['train']['margin']
+
+                # 方案 B (进阶)：如果你想尝试 Warmup (预热) 策略，可以打开下面的注释，注释掉方案A
+                # progress = epoch / self.epochs
+                # start_margin = 0.1  # 初始用较小的 margin
+                # target_margin = self.config['train']['margin'] # 最终达到 config 设定值
+                # self.margin = start_margin + (target_margin - start_margin) * progress
+
+                if b_idx == 0:  # 每个 epoch 开始时打印一次即可，避免刷屏
+                    print(f"📉 Current Margin: {self.margin:.4f}")
+
                 if b_idx >= self.iterations_per_epoch: break
 
                 imgs, labels = imgs.to(self.device), labels.to(self.device)
@@ -342,7 +441,7 @@ class Trainer:
             train_loss = total_loss / num_batches
 
             print(f"✅ Train Loss: {train_loss:.4f} | {epoch_time:.1f}s")
-            print(f"📊 VAL | EER: {val_res['eer']:.4f} | ACC: {val_res['acc']:.4f} | GAP: {val_res['gap']:.4f}")
+            print(f"📊 VAL | EER: {val_res['eer']:.4f} | eer_threshold: {val_res['eer_threshold']:.4f} |  ACC: {val_res['acc']:.4f} | GAP: {val_res['gap']:.4f}")
 
             self.scheduler.step()
             self.history.append({

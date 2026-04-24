@@ -26,6 +26,7 @@ class SigNet(nn.Module):
 
         self.bn1 = nn.BatchNorm2d(96)
 
+
         self.pool1 = nn.MaxPool2d(
             kernel_size=3,
             stride=2
@@ -93,7 +94,7 @@ class SigNet(nn.Module):
         # ======================
         self.fc1 = nn.Linear(flatten_dim, 1024)
 
-        self.dropout1 = nn.Dropout(0.5)
+        self.dropout1 = nn.Dropout(0.6)
 
         self.fc2 = nn.Linear(1024, 128)
 
