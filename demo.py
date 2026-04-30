@@ -10,6 +10,33 @@ from models.siamese import SiameseNetwork
 
 
 # ==========================================
+# 核心预处理：严格对齐训练阶段的二值化与防形变缩放
+# ==========================================
+class ResizeAndPad:
+    """等比例缩放并填充纯白背景，加入二值化消除灰度伪影"""
+
+    def __init__(self, target_size=(150, 220)):
+        self.target_size = target_size
+
+    def __call__(self, img):
+        # 暴力二值化，消除背景杂色
+        img = img.point(lambda p: 255 if p > 180 else 0)
+
+        w, h = img.size
+        scale = min(self.target_size[1] / w, self.target_size[0] / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        new_img = Image.new('L', (self.target_size[1], self.target_size[0]), 255)
+
+        paste_x = (self.target_size[1] - new_w) // 2
+        paste_y = (self.target_size[0] - new_h) // 2
+        new_img.paste(img, (paste_x, paste_y))
+
+        return new_img
+
+
+# ==========================================
 # 终端颜色代码（让输出更酷炫）
 # ==========================================
 class Colors:
@@ -38,23 +65,25 @@ def main():
     parser.add_argument("--img1", type=str, required=True, help="第一张签名图片路径（通常是底库中的基准签名）")
     parser.add_argument("--img2", type=str, required=True, help="第二张签名图片路径（需要验证的现场签名）")
     parser.add_argument("--ckpt", type=str, required=True, help="训练好的 best_model.pth 路径")
-    parser.add_argument("--threshold", type=float, default=0.3636, help="判定阈值 (默认基于 ArcFace 最佳结果 0.3636)")
+    # 🔥 调整默认阈值为 0.85，因为 ArcFace 对中文签名的最佳阈值通常较高
+    parser.add_argument("--threshold", type=float, default=0.69,
+                        help="判定阈值 (建议查阅训练日志中的 best_threshold)")
     args = parser.parse_args()
 
     # 1. 设备检测
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{Colors.CYAN}✨ 初始化推理引擎... 当前使用设备: {device}{Colors.RESET}")
 
-    # 2. 图像预处理流水线（严格对齐 eval.py）
+    # 2. 图像预处理流水线（严格对齐自定义的 ResizeAndPad）
     transform = transforms.Compose([
-        transforms.ResizeAndPad((150, 220)),
+        ResizeAndPad((150, 220)),
         transforms.ToTensor(),
         transforms.Normalize([0.5], [0.5])
     ])
 
-    # 3. 加载模型
+    # 3. 加载模型 (🔥 关键修复：强制声明使用 resnet18)
     print(f"{Colors.CYAN}📦 正在加载模型权重: {args.ckpt}{Colors.RESET}")
-    model = SiameseNetwork().to(device)
+    model = SiameseNetwork(backbone_type='resnet18').to(device)
 
     try:
         state_dict = torch.load(args.ckpt, map_location=device, weights_only=True)
@@ -74,6 +103,10 @@ def main():
     print(f"{Colors.CYAN}🔍 神经特征提取中...{Colors.RESET}")
     with torch.no_grad():
         emb1, emb2 = model(img1, img2)
+
+        # 🔥 关键修复：为 ArcFace 补全 L2 归一化
+        emb1 = F.normalize(emb1, dim=1)
+        emb2 = F.normalize(emb2, dim=1)
 
         # 计算余弦相似度 (Cosine Similarity)
         # 结果范围在 [-1, 1] 之间，越接近 1 越相似

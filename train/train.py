@@ -1,3 +1,8 @@
+# ==========================================
+# 解决 Windows 下 OpenCV 与 PyTorch 多进程死锁
+# ==========================================
+import cv2
+cv2.setNumThreads(0)
 import json
 import torch
 import torch.optim as optim
@@ -7,9 +12,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from tqdm import tqdm
-import numpy as np
 from torch.cuda.amp import autocast, GradScaler
-from sklearn.metrics import roc_curve
 import os
 from datetime import datetime
 from PIL import Image
@@ -74,7 +77,7 @@ class Trainer:
 
         self.epochs = self.config['train']['epochs']
         self.iterations_per_epoch = self.config['train']['iterations_per_epoch']
-        self.batch_size = self.config['train']['batch_size']  # 🔥 建议在 config 中设为 8
+        self.batch_size = self.config['train']['batch_size']
 
         # ==========================================
         # 数据集与预处理
@@ -116,24 +119,43 @@ class Trainer:
         backbone_type = self.config['model'].get('backbone', 'resnet18')
         self.model = SiameseNetwork(backbone_type=backbone_type).to(self.device)
 
-        # ArcFace 初始化 (降低 margin 至 0.3 以适配高难度中文)
         num_classes = len(self.train_dataset.writer_dict) * 2
         self.arcface = ArcFace(in_features=128, out_features=num_classes, s=30.0, m=0.3).to(self.device)
 
-        # 冻结 ResNet18 底层，节省显存与算力
-        if backbone_type == 'resnet18':
-            print("❄️ Freezing Layer 1 & 2 of ResNet18...")
-            # 仅仅冻结有预训练权重的 layer1 和 layer2
-            for param in self.model.backbone.layer1.parameters():
-                param.requires_grad = False
-            for param in self.model.backbone.layer2.parameters():
-                param.requires_grad = False
+        # ---------------------------------------------------------
+        # 🔥 核心修复：移除死板的冻结，启用高级的“分层学习率”
+        # ---------------------------------------------------------
+        base_lr = self.config['train']['learning_rate']  # 比如 0.0001
 
-        trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
-        self.optimizer = optim.Adam([
-            {'params': trainable_params},
-            {'params': self.arcface.parameters()}
-        ], lr=self.config['train']['learning_rate'], weight_decay=1e-3)
+        if backbone_type == 'resnet18':
+
+            backbone_pretrained_params = []
+            new_random_params = []
+
+            for name, param in self.model.named_parameters():
+                # 注意：因为我们重写了 backbone.conv1，所以它属于 random_params
+                if 'backbone' in name and 'conv1' not in name:
+                    backbone_pretrained_params.append(param)
+                else:
+                    new_random_params.append(param)
+
+            # 把 ArcFace 的参数也加入到新参数列表中
+            new_random_params.extend(list(self.arcface.parameters()))
+            # 将网络分为两组，分别给予不同的学习率
+            self.optimizer = optim.Adam([
+                # 预训练的躯干：给它 10 倍极小的学习率 (1e-5)，让它缓慢微调，不破坏基础认知
+                {'params': backbone_pretrained_params, 'lr': base_lr * 0.1},
+                # 随机初始化的部分(包括刚改的conv1和ArcFace)：给正常学习率 (1e-4)，让它快速学习
+                {'params': new_random_params, 'lr': base_lr}
+            ], weight_decay=1e-3)
+
+        else:
+            # 如果是 SigNet，依然保持原样
+            trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
+            self.optimizer = optim.Adam([
+                {'params': trainable_params},
+                {'params': self.arcface.parameters()}
+            ], lr=base_lr, weight_decay=1e-3)
 
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.epochs)
 
@@ -145,12 +167,8 @@ class Trainer:
         all_scores, all_labels = [], []
 
         with torch.no_grad():
-            # 这里的 val_loader 没有生成 pair，我们通过两两计算得到对偶距离
             for img, label in self.val_loader:  # 注意：val_loader现在是标准的单样本输出
-                pass  # 💡 因为 ArcFace 跑的是全局分类，原有的 PairGenerator 验证方法在此处不太合适
-                # 为了代码干净，我们将实际的评测委托给底部的 Evaluator (它会自动构建评测对)
-
-        # 这里的返回值仅做占位，实际精确指标由 Evaluator 跑出
+                pass
         return {"eer": 1.0, "acc": 0.0, "gap": 0.0}
 
         # =====================================================
@@ -173,7 +191,7 @@ class Trainer:
             pbar = tqdm(self.train_loader, leave=False)
 
             for b_idx, (imgs, labels) in enumerate(pbar):
-                if b_idx >= self.iterations_per_epoch: break
+                # if b_idx >= self.iterations_per_epoch: break
 
                 imgs, labels = imgs.to(self.device), labels.to(self.device)
                 self.optimizer.zero_grad()

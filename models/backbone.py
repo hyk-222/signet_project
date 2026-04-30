@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet18
-
+from torchvision.models import resnet18, ResNet18_Weights
 
 class ResNet18_Signature(nn.Module):
     """
@@ -10,18 +9,19 @@ class ResNet18_Signature(nn.Module):
     Output: 128-d embedding
     """
 
-    def __init__(self, embedding_dim=128, pretrained=False):
+    def __init__(self, embedding_dim=128, pretrained=True):
         super().__init__()
 
-        base = resnet18(pretrained=pretrained)
+        weights = ResNet18_Weights.DEFAULT if pretrained else None
+        base = resnet18(weights=weights)
 
         # ======================
         # 1. 改输入通道（1通道）
         # ======================
         self.conv1 = nn.Conv2d(
             1, 64,
-            kernel_size=3,   # 🔥 改小
-            stride=1,        # 🔥 保细节
+            kernel_size=3,
+            stride=1,
             padding=1,
             bias=False
         )
